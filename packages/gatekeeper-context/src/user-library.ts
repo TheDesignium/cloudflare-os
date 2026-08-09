@@ -32,6 +32,10 @@ export class UserLibraryDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage = makeUserLibraryStorage(ctx.storage);
   }
 
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   // --- Private collections (the user's own) ---
 
   createOwnedCollection(id: string, title: string, description: string, icon?: string): void {

@@ -484,6 +484,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+  }
+
   // Serialize minting, reconnect, and revoke against each other. Minting is a network round trip, so
   // without this a single invalidated token has every concurrent caller mint its own — a burst
   // against Google's token endpoint that may get rate-limited, turning a recoverable 401 into a hard
@@ -1789,6 +1794,10 @@ type GmailGatekeeperImplProps = {
 @validateRpc()
 export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
     implements Gatekeeper<GmailSession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #tokens = new AccessTokenCache(opts => {
     let stub = this.ctx.exports.UserAccount.get(
         this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
@@ -2169,6 +2178,10 @@ const EDIT_DOCUMENT_ACTION: ActionKind = {
 export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
     implements Gatekeeper<GoogleDocSession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #simulationCache: GoogleDocSimulationCacheHolder = {};
   #tokens = new AccessTokenCache(opts => {
     let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
@@ -2523,6 +2536,10 @@ type GoogleSheetsGatekeeperImplProps = {
 export class GoogleSheetsGatekeeperImpl
     extends DurableObject<Env, GoogleSheetsGatekeeperImplProps>
     implements Gatekeeper<GoogleSpreadsheetSession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #tokens = new AccessTokenCache(opts => {
     let account = this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
@@ -2831,6 +2848,10 @@ function summarizePeople(people: string[]): string {
 export class GoogleCalendarGatekeeperImpl
     extends DurableObject<Env, GoogleCalendarGatekeeperImplProps>
     implements Gatekeeper<GoogleCalendarSession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #tokens = new AccessTokenCache(opts => {
     let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
         this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
@@ -3258,6 +3279,10 @@ type BigQueryGatekeeperImplProps = {
 export class BigQueryGatekeeperImpl
     extends DurableObject<Env, BigQueryGatekeeperImplProps>
     implements Gatekeeper<BigQuerySession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #tokens = new AccessTokenCache(opts => {
       let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
         this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
@@ -3758,5 +3783,31 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
       prohibitAllSharing: true,
     });
     return result;
+  }
+}
+
+export class DataResetEntrypoint extends WorkerEntrypoint<Env> {
+  async purgeDurableObjectForDataReset(className: string, objectId: string): Promise<unknown> {
+    if (className === "UserAccount") {
+      let ns = this.ctx.exports.UserAccount;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "GmailGatekeeperImpl") {
+      let ns = this.ctx.exports.GmailGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "GoogleSheetsGatekeeperImpl") {
+      let ns = this.ctx.exports.GoogleSheetsGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "GoogleCalendarGatekeeperImpl") {
+      let ns = this.ctx.exports.GoogleCalendarGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "BigQueryGatekeeperImpl") {
+      let ns = this.ctx.exports.BigQueryGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    throw new Error(`Unsupported Google reset class: ${className}`);
   }
 }

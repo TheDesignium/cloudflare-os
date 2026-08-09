@@ -125,6 +125,10 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     this.storage = makeContextCollectionStorage(ctx.storage);
   }
 
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   // Sharing domain for all cross-DO/KV references.
   #domain(): string {
     return this.storage.sharingDomain.get();

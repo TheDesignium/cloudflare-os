@@ -219,6 +219,10 @@ export class ContextVerifier
 export class ContextGatekeeper
     extends DurableObject<Cloudflare.Env, ContextAccountProps>
     implements Gatekeeper<LibraryReadSession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #collections() { return this.ctx.exports.ContextCollectionDurableObject; }
   #userLibraries() { return this.ctx.exports.UserLibraryDurableObject; }
   #observers() {

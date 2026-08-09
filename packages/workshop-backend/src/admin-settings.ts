@@ -73,6 +73,22 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
+  // Remove user-owned entries from the deployment-wide featured mirror while preserving all
+  // deployment settings and bundled formats. Called before the reset tool removes user Blueprint
+  // records from KV, so ownership can still be determined from the authoritative record.
+  async purgeUserDataForReset(): Promise<{ removedFeaturedBlueprints: number }> {
+    let removedFeaturedBlueprints = 0;
+    for (let featured of this.storage.featuredBlueprints.list()) {
+      let record = await readBlueprintKvRecord(this.env, featured.id);
+      if (!record || record.ownerId !== undefined) {
+        this.storage.featuredBlueprints.delete(featured.id);
+        removedFeaturedBlueprints++;
+      }
+    }
+    await this.#writeFeaturedSnapshot();
+    return { removedFeaturedBlueprints };
+  }
+
   // Install the format blueprints bundled with this deployment, if that hasn't already happened
   // for this exact manifest. Idempotent and cheap: an up-to-date deployment does one string
   // comparison and returns.

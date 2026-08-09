@@ -207,6 +207,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // One connected MCP server, for one user: `McpAccountBase` plus where this Worker lives and how it
 // mints an account. Nothing outside this object ever sees a credential.
 export class McpAccount extends McpAccountBase<Env> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   protected baseUrl(): string {
     return getBaseUrl(this.env);
   }
@@ -383,6 +387,10 @@ type McpGatekeeperImplProps = {
 export class McpGatekeeperImpl
   extends McpFacetBase<Env, McpGatekeeperImplProps, McpSessionImpl> {
 
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   protected get log() {
     return logger.with({ serverHost: hostOf(this.ctx.props.endpoint) });
   }
@@ -462,3 +470,17 @@ export class McpGatekeeperImpl
 // class to a Gadget, where it can be seen.
 @validateRpc()
 class McpSessionImpl extends McpSessionBase {}
+
+export class DataResetEntrypoint extends WorkerEntrypoint<Env> {
+  async purgeDurableObjectForDataReset(className: string, objectId: string): Promise<unknown> {
+    if (className === "McpAccount") {
+      let ns = this.ctx.exports.McpAccount;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "McpGatekeeperImpl") {
+      let ns = this.ctx.exports.McpGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    throw new Error(`Unsupported MCP reset class: ${className}`);
+  }
+}

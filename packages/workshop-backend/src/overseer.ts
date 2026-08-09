@@ -3835,14 +3835,14 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
-  // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
-  // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
-  // needed to re-resolve the model config on resume.
+  // Start an agent turn for the given chat and return its completion promise. Persists an
+  // `ActiveAgentRecord` so the turn can be resumed after a server restart, and tracks the turn so
+  // the keep-alive alarm is held while it runs. `initiatorUserId` is the hex DO ID of the user whose
+  // model/account is used, needed to re-resolve the model config on resume.
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
-             keepAlive: boolean = false): void {
+             keepAlive: boolean = false): Promise<void> {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -3857,6 +3857,7 @@ class OverseerImpl implements AgentHooks {
     let liveChat = this.#getLiveChat(chatId);
     let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
     if (keepAlive) this.ctx.waitUntil(turn);
+    return turn;
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
@@ -6306,6 +6307,36 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl = new OverseerImpl(ctx, env);
   }
 
+  // Maintenance-only RPC used by the deployment reset tool. Disable external hooks while their
+  // controller capabilities are still present, then clear the workspace even when a provider-side
+  // cleanup call fails. Every gatekeeper DO is purged separately by the same reset operation.
+  async purgeForDataReset(): Promise<{ hookDisableFailures: number }> {
+    let hookDisableFailures = 0;
+    this.impl.destroyAllLiveChats();
+    // Resource gatekeepers and gadgets are Durable Object facets owned by this workspace. Their
+    // storage is separate from the primary object's storage, so remove every known facet too.
+    let facetNames = [
+      ...Array.from(this.impl.storage.gatekeepers.list()).map(
+          record => `gatekeeper${record.id}`),
+      ...Array.from(this.impl.storage.gadgets.list()).map(
+          record => this.impl.gadgetFacetName(record.id)),
+    ];
+    for (let record of Array.from(this.impl.storage.boundHooks.list())) {
+      try {
+        await this.impl.deleteHook(record.id);
+      } catch (err) {
+        hookDisableFailures++;
+        this.impl.logger.error("hook disable failed during deployment data reset", {
+          event: "hook.reset.disable.failed",
+          error: err,
+        });
+      }
+    }
+    for (let facetName of facetNames) this.ctx.facets.delete(facetName);
+    await this.ctx.storage.deleteAll();
+    return { hookDisableFailures };
+  }
+
   // The alarm handler kicks in when we've had running agents that haven't completed for at least a
   // minute. This serves a few purposes:
   // - If the DO is still running when this is called, but the client has closed their browser and
@@ -7858,8 +7889,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     fresh.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(fresh);
 
-    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.clientUser.id.toString());
+    await this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                               this.clientUser.id.toString());
   }
 
   async acceptConnectionRequest(

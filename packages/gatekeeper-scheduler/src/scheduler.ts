@@ -230,6 +230,10 @@ export class SchedulerGatekeeper
   extends DurableObject<Cloudflare.Env, { accountId: string }>
   implements Gatekeeper<ScheduleSession>
 {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   /** Describes the ambient Scheduled Tasks binding. */
   async describe(): Promise<ResourceDescription> {
     return {

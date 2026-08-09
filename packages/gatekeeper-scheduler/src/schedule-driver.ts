@@ -80,6 +80,11 @@ type PendingState = Extract<EnabledSchedule, { status: "pending" }>;
 type PendingStage = PendingState["stage"];
 
 export class ScheduleDriver extends DurableObject {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+  }
+
   async enable(
     activation: ScheduleActivation,
     initiator: ScheduleInitiator,

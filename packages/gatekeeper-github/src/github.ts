@@ -1043,6 +1043,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
                     requestedScopes?: string[], ephemeral?: boolean): Promise<void> {
     if (!this.ctx.storage.kv.get<string>("accessToken")) {
@@ -1377,6 +1381,10 @@ export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
 @validateRpc()
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
   implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
+
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
 
   #pendingActionsCache?: GitHubAction[];
 
@@ -4064,5 +4072,19 @@ class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest
       description: `Merge pull request #${this.logicalId}${options?.method ? ` using ${options.method}` : ""}.`,
       implementsRevert: false,
     });
+  }
+}
+
+export class DataResetEntrypoint extends WorkerEntrypoint<Env> {
+  async purgeDurableObjectForDataReset(className: string, objectId: string): Promise<unknown> {
+    if (className === "UserAccount") {
+      let ns = this.ctx.exports.UserAccount;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "GitHubGatekeeperImpl") {
+      let ns = this.ctx.exports.GitHubGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    throw new Error(`Unsupported GitHub reset class: ${className}`);
   }
 }

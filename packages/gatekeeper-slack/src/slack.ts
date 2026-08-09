@@ -315,6 +315,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // ── UserAccount DO: token storage + rotation ────────────────────────
 
 export class UserAccount extends DurableObject<Env> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   // Serialize refresh, reconnect, and revoke because rotating refresh tokens are single-use.
   #credentialUpdate: Promise<void> = Promise.resolve();
 
@@ -855,6 +859,10 @@ type TrackedConversationState = "pending" | "observed";
 @validateRpc()
 export class SlackWorkspaceGatekeeperImpl extends DurableObject<Env, SlackWorkspaceGatekeeperImplProps>
     implements Gatekeeper<SlackWorkspaceSession> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #apiInstance?: SlackApi;
 
   #account(): DurableObjectStub<UserAccount> {
@@ -1010,6 +1018,10 @@ type SlackConversationGatekeeperImplProps = {
 export class SlackConversationGatekeeperImpl
     extends DurableObject<Env, SlackConversationGatekeeperImplProps>
     implements Gatekeeper<SlackConversation> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #apiInstance?: SlackApi;
 
   #account(): DurableObjectStub<UserAccount> {
@@ -1080,6 +1092,10 @@ type SlackThreadGatekeeperImplProps = {
 @validateRpc()
 export class SlackThreadGatekeeperImpl extends DurableObject<Env, SlackThreadGatekeeperImplProps>
     implements Gatekeeper<SlackThread> {
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   #apiInstance?: SlackApi;
 
   #account(): DurableObjectStub<UserAccount> {
@@ -1375,5 +1391,27 @@ class SlackThreadImpl extends RpcTarget implements SlackThread {
           `Read a thread of ${messages.length} messages in conversation ${this.#conversationId}.`,
     });
     return messages.slice(0, MAX_THREAD_REPLIES);
+  }
+}
+
+export class DataResetEntrypoint extends WorkerEntrypoint<Env> {
+  async purgeDurableObjectForDataReset(className: string, objectId: string): Promise<unknown> {
+    if (className === "UserAccount") {
+      let ns = this.ctx.exports.UserAccount;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "SlackWorkspaceGatekeeperImpl") {
+      let ns = this.ctx.exports.SlackWorkspaceGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "SlackConversationGatekeeperImpl") {
+      let ns = this.ctx.exports.SlackConversationGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "SlackThreadGatekeeperImpl") {
+      let ns = this.ctx.exports.SlackThreadGatekeeperImpl;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    throw new Error(`Unsupported Slack reset class: ${className}`);
   }
 }

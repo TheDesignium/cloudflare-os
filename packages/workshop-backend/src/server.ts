@@ -21,7 +21,7 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -59,6 +59,27 @@ export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
 
 // Re-export service-binding entrypoint for external channel integrations.
 export { ExternalMessageGateway };
+
+// Private service-binding entrypoint used only by the deployment reset CLI. Keeping the namespace
+// lookup in the owning Worker lets Wrangler run the caller locally while proxying this RPC to the
+// deployed Durable Objects.
+export class DataResetEntrypoint extends WorkerEntrypoint<Env> {
+  async purgeDurableObjectForDataReset(className: string, objectId: string): Promise<unknown> {
+    if (className === "OverseerDurableObject") {
+      let ns = this.ctx.exports.OverseerDurableObject;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    if (className === "UserDurableObject") {
+      let ns = this.ctx.exports.UserDurableObject;
+      return ns.get(ns.idFromString(objectId)).purgeForDataReset();
+    }
+    throw new Error(`Unsupported Workshop reset class: ${className}`);
+  }
+
+  async purgeUserDataForReset(): Promise<unknown> {
+    return this.ctx.exports.AdminSettings.getByName("").purgeUserDataForReset();
+  }
+}
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {

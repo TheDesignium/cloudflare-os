@@ -25,6 +25,10 @@ export class LibraryRegistryDurableObject extends DurableObject<Cloudflare.Env> 
     this.storage = makeRegistryStorage(ctx.storage);
   }
 
+  async purgeForDataReset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   async #writeSnapshot(domain: string): Promise<void> {
     let collections = [...this.storage.publicCollections.list()];
     await this.env.CONTEXT_COLLECTIONS.put(

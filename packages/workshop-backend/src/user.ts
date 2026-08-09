@@ -295,6 +295,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
+  // Maintenance-only RPC used by the deployment reset tool. The tool reaches this object through
+  // a temporary remote Durable Object binding; no public Workshop API exposes this method.
+  // Revoke connected accounts first so providers and ambient gatekeepers can clean up their own
+  // state, then remove anything left locally. Cleanup failures are reported but never retain the
+  // user's local account data.
+  async purgeForDataReset(): Promise<{ accountRevocationFailures: number }> {
+    let accountRevocationFailures = 0;
+    for (let account of this.#connectedAccountRecords()) {
+      try {
+        await account.account.revoke();
+      } catch (err) {
+        accountRevocationFailures++;
+        logger.error("account revoke failed during deployment data reset", {
+          event: "account.reset.revoke.failed",
+          vendorId: account.vendorId,
+          accountId: account.id,
+          error: err,
+        });
+      }
+    }
+
+    await this.ctx.storage.deleteAll();
+    return { accountRevocationFailures };
+  }
+
   async authenticate(token: string): Promise<void> {
     let tokenBytes = Uint8Array.fromBase64(token);
     let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
