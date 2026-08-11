@@ -5588,14 +5588,14 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
-  // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
-  // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
-  // needed to re-resolve the model config on resume.
+  // Start an agent turn for the given chat and return its completion promise. Persists an
+  // `ActiveAgentRecord` so the turn can be resumed after a server restart, and tracks the turn so
+  // the keep-alive alarm is held while it runs. `initiatorUserId` is the hex DO ID of the user whose
+  // model/account is used, needed to re-resolve the model config on resume.
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
-             keepAlive: boolean = false): void {
+             keepAlive: boolean = false): Promise<void> {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -5610,6 +5610,7 @@ class OverseerImpl implements AgentHooks {
     let liveChat = this.#getLiveChat(chatId);
     let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
     if (keepAlive) this.ctx.waitUntil(turn);
+    return turn;
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
@@ -9678,8 +9679,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     fresh.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(fresh);
 
-    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.#clientUser.id.toString());
+    await this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                               this.#clientUser.id.toString());
   }
 
   async acceptConnectionRequest(
