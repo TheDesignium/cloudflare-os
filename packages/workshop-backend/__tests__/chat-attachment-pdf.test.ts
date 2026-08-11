@@ -57,13 +57,15 @@ describe("bridgePdfAttachments", () => {
       ],
     };
 
-    const bridged = bridgePdfAttachments("openai-responses", payload) as typeof payload;
-    expect(bridged.input[0].content[1]).toEqual({
-      type: "input_file",
-      filename: "attachment.pdf",
-      file_data: "data:application/pdf;base64,JVBERi0=",
-    });
-    expect(bridged.input[0].content[2]).toBe(payload.input[0].content[2]);
+    for (const api of ["openai-responses", "openai-codex-responses"] as const) {
+      const bridged = bridgePdfAttachments(api, payload) as typeof payload;
+      expect(bridged.input[0].content[1]).toEqual({
+        type: "input_file",
+        filename: "attachment.pdf",
+        file_data: "data:application/pdf;base64,JVBERi0=",
+      });
+      expect(bridged.input[0].content[2]).toBe(payload.input[0].content[2]);
+    }
   });
 
   it("leaves payloads without PDF parts unchanged", () => {

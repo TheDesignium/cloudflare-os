@@ -12,7 +12,7 @@ import type { Api } from "@earendil-works/pi-ai";
 //   which is exactly what the adapter emits.
 // - anthropic-messages: the adapter emits {type: "image", source: {type: "base64", media_type:
 //   "application/pdf", data}}; Anthropic's real PDF block is the same object tagged "document".
-// - openai-responses: the adapter emits {type: "input_image", image_url:
+// - openai-responses / openai-codex-responses: the adapter emits {type: "input_image", image_url:
 //   "data:application/pdf;base64,..."}; OpenAI wants {type: "input_file", filename, file_data}
 //   with the same data URL. The filename is synthesized -- the payload no longer knows the
 //   original name, which the replay instead surfaces in an adjacent text part.
@@ -28,6 +28,7 @@ export const PDF_MIME_TYPE = "application/pdf";
 /** Whether PDF attachments can reach this pi API (natively or via bridgePdfAttachments()). */
 export function modelApiSupportsPdfAttachments(api: Api): boolean {
   return api === "anthropic-messages" || api === "openai-responses" ||
+      api === "openai-codex-responses" ||
       api === "google-generative-ai";
 }
 
@@ -40,6 +41,7 @@ export function bridgePdfAttachments(api: Api, payload: unknown): unknown | unde
   switch (api) {
     case "anthropic-messages": return bridgeAnthropicMessages(payload);
     case "openai-responses": return bridgeOpenAiResponses(payload);
+    case "openai-codex-responses": return bridgeOpenAiResponses(payload);
     default: return undefined;
   }
 }

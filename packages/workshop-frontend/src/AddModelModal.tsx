@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
-import { RpcStub } from 'capnweb'
+import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, ChatGptDeviceCode, ChatGptModelAddCallbacks, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
 interface AddModelModalProps {
@@ -19,6 +19,7 @@ type SelectionType =
 const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
+  'openai-codex': 'ChatGPT (Codex)',
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
   ollama: 'Ollama',
@@ -28,6 +29,7 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
 const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   anthropic: 'sk-ant-...',
   openai: 'sk-...',
+  'openai-codex': '',
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
@@ -66,10 +68,12 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
   const providerOrder = Object.keys(SUGGESTED_MODELS) as AiModelProvider[]
 
   for (const provider of providerOrder) {
-    if (enabledProviders && !enabledProviders.has(provider)) continue
+    const isChatGpt = provider === 'openai-codex'
+    if (enabledProviders && !isChatGpt && !enabledProviders.has(provider)) continue
 
-    // In gateway mode, suggested models are already built-in, so don't list them.
-    if (!gatewayMode) {
+    // Gateway-backed suggestions are built in. ChatGPT subscription models remain direct and are
+    // offered independently of the deployment's AI Gateway configuration.
+    if (!gatewayMode || isChatGpt) {
       for (const [modelId, model] of Object.entries(SUGGESTED_MODELS[provider])) {
         options.push({
           value: encodeSelection(provider, modelId),
@@ -79,11 +83,13 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
       }
     }
 
-    options.push({
-      value: encodeSelection(provider),
-      label: `Other ${PROVIDER_LABELS[provider] || provider}...`,
-      provider,
-    })
+    if (!isChatGpt) {
+      options.push({
+        value: encodeSelection(provider),
+        label: `Other ${PROVIDER_LABELS[provider] || provider}...`,
+        provider,
+      })
+    }
   }
 
   return options
@@ -102,6 +108,27 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [apiToken, setApiToken] = useState('')
   const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
+  const [deviceCode, setDeviceCode] = useState<ChatGptDeviceCode | null>(null)
+
+  const loginResourcesRef = useRef<{
+    attempt?: Disposable
+    callbacks?: Disposable
+    authWindow?: Window | null
+  } | null>(null)
+  const loginCancelledRef = useRef(false)
+
+  const disposeLoginResources = () => {
+    const resources = loginResourcesRef.current
+    loginResourcesRef.current = null
+    if (!resources) return
+    if (resources.attempt) {
+      try { resources.attempt[Symbol.dispose]() } catch { /* already settled/disposed */ }
+    }
+    if (resources.callbacks) {
+      try { resources.callbacks[Symbol.dispose]() } catch { /* already disposed */ }
+    }
+    try { resources.authWindow?.close() } catch { /* already closed */ }
+  }
 
   // Validation errors
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -117,6 +144,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Reset all state when dialog closes
   useEffect(() => {
     if (!visible) {
+      loginCancelledRef.current = true
+      disposeLoginResources()
       setSelection(null)
       setSelectValue(undefined)
       setModelId('')
@@ -124,10 +153,22 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setApiToken('')
       setAccountId('')
       setApiUrl('')
+      setDeviceCode(null)
       setErrors({})
       setAdvancedOpen(false)
+    } else {
+      loginCancelledRef.current = false
     }
   }, [visible])
+
+  useEffect(() => {
+    // React StrictMode runs mount cleanup once before the real mount in development.
+    loginCancelledRef.current = false
+    return () => {
+      loginCancelledRef.current = true
+      disposeLoginResources()
+    }
+  }, [])
 
   const handleModelSelect = (value: string) => {
     setSelectValue(value)
@@ -143,6 +184,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setDisplayName(sel.displayName)
     }
     setApiToken('')
+    setDeviceCode(null)
     setAccountId('')
     setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434' : '')
   }
@@ -161,7 +203,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
-    const showCredentials = !gatewayMode
+    const showCredentials = !gatewayMode && selection?.provider !== 'openai-codex'
 
     if (showCredentials && selection && !isOllama && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
@@ -179,15 +221,81 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     return Object.keys(newErrors).length === 0
   }
 
+  const handleChatGptSubmit = async (finalModelId: string) => {
+    loginCancelledRef.current = false
+    setDeviceCode(null)
+
+    // Open synchronously from the button click so popup policy cannot block the later device-code
+    // event. A blocked popup is harmless because the modal always renders the same link and code.
+    const authWindow = window.open('about:blank', 'chatgpt-codex-login')
+    if (authWindow) {
+      try {
+        authWindow.opener = null
+        authWindow.document.title = 'Connect ChatGPT'
+        authWindow.document.body.textContent = 'Waiting for a ChatGPT device code…'
+      } catch { /* about:blank may already have navigated */ }
+    }
+    const resources = { authWindow } as {
+      attempt?: Disposable
+      callbacks?: Disposable
+      authWindow?: Window | null
+    }
+    loginResourcesRef.current = resources
+
+    try {
+      const attempt = await authenticatedApi.startChatGptModelAdd(finalModelId)
+      if (loginCancelledRef.current) {
+        try { (attempt as unknown as Disposable)[Symbol.dispose]() } catch { /* disposed */ }
+        return
+      }
+      resources.attempt = attempt as unknown as Disposable
+
+      const callbackTarget = new (class extends RpcTarget implements ChatGptModelAddCallbacks {
+        onDeviceCode(challenge: ChatGptDeviceCode): void {
+          if (loginCancelledRef.current) return
+          setDeviceCode(challenge)
+          try {
+            if (authWindow && !authWindow.closed) {
+              authWindow.location.href = challenge.verificationUri
+            }
+          } catch { /* the fallback link below remains usable */ }
+        }
+      })()
+      const callbacks = new RpcStub(callbackTarget)
+      resources.callbacks = callbacks as unknown as Disposable
+
+      await attempt.wait(callbacks)
+      if (loginCancelledRef.current) return
+      toasts.add({ title: 'ChatGPT model added successfully', variant: 'success' })
+      onSuccess()
+    } catch (error) {
+      if (!loginCancelledRef.current) {
+        console.error('Failed to add ChatGPT model:', error)
+        toasts.add({
+          title: error instanceof Error ? error.message : 'Failed to connect ChatGPT',
+          variant: 'error',
+        })
+      }
+    } finally {
+      if (loginResourcesRef.current === resources) disposeLoginResources()
+      if (!loginCancelledRef.current) setLoading(false)
+    }
+  }
+
   const handleSubmit = async () => {
     if (!validate()) return
 
     setLoading(true)
-    try {
-      const isSuggested = selection!.type === 'suggested'
-      const finalModelId = isSuggested ? selection!.modelId : modelId.trim()
-      const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim()
+    const isSuggested = selection!.type === 'suggested'
+    const finalModelId = isSuggested ? selection!.modelId : modelId.trim()
+    const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim()
 
+    if (selection!.provider === 'openai-codex') {
+      await handleChatGptSubmit(finalModelId)
+      return
+    }
+
+    try {
       const profile: AiChatAuthorInfo = {
         type: 'agent',
         id: finalModelId,
@@ -205,7 +313,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       await authenticatedApi.addModel(profile, config)
       toasts.add({ title: 'AI model added successfully', variant: 'success' })
       onSuccess()
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to add model:', error)
       toasts.add({ title: 'Failed to add model', variant: 'error' })
     } finally {
@@ -218,7 +326,15 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
-  const showCredentials = !gatewayMode
+  const isChatGpt = selection?.provider === 'openai-codex'
+  const showCredentials = !gatewayMode && !isChatGpt
+
+  const handleCancel = () => {
+    loginCancelledRef.current = true
+    disposeLoginResources()
+    setLoading(false)
+    onCancel()
+  }
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []
@@ -232,7 +348,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   }
 
   return (
-    <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
+    <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) handleCancel() }}>
       <Dialog className="p-6" size="lg">
         <Dialog.Title className="text-lg font-semibold mb-4">
           Add AI Model
@@ -245,6 +361,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             className="w-full text-sm"
             placeholder={gatewayMode ? 'Choose a provider...' : 'Choose an AI model...'}
             value={selectValue}
+            disabled={loading}
             onValueChange={(v) => handleModelSelect(v as string)}
             error={errors.selection}
             renderValue={(v) => {
@@ -357,22 +474,55 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               </Collapsible.DefaultPanel>
             </Collapsible.Root>
           )}
+
+          {isChatGpt && (
+            <div className="rounded-lg border border-kumo-line bg-kumo-tint p-4 text-sm text-kumo-subtle">
+              {deviceCode ? (
+                <div className="space-y-3">
+                  <p>Open ChatGPT and enter this one-time code:</p>
+                  <div className="font-mono text-2xl font-semibold tracking-widest text-kumo-default">
+                    {deviceCode.userCode}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      onClick={() => void navigator.clipboard.writeText(deviceCode.userCode)}
+                    >
+                      Copy code
+                    </Button>
+                    <a
+                      href={deviceCode.verificationUri}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-kumo-brand underline"
+                    >
+                      Open ChatGPT
+                    </a>
+                  </div>
+                  <p>The code expires in {Math.ceil(deviceCode.expiresInSeconds / 60)} minutes.</p>
+                </div>
+              ) : (
+                <p>
+                  This model uses your ChatGPT subscription. Connecting opens ChatGPT in a new tab;
+                  the authorization link and code will also remain visible here.
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
         <div className="mt-6 flex justify-end gap-2">
-          <Dialog.Close render={(props) => (
-            <Button variant="secondary" {...props} disabled={loading}>
-              Cancel
-            </Button>
-          )} />
+          <Button variant="secondary" onClick={handleCancel} disabled={loading && !isChatGpt}>
+            Cancel
+          </Button>
           <Button
             variant="primary"
             onClick={handleSubmit}
             loading={loading}
             disabled={!selection}
           >
-            Add Model
+            {isChatGpt ? 'Connect ChatGPT & Add Model' : 'Add Model'}
           </Button>
         </div>
       </Dialog>

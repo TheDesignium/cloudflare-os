@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
+import { SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig }
+  from "@gadgets/workshop-shared/api";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
@@ -282,6 +284,34 @@ describe("getModel direct routing (no gateway)", () => {
     expect(request.headers.get("x-api-key")).toBe("direct-api-token");
     expect(request.headers.get("cf-aig-metadata")).toBeNull();
   }, 15000);
+
+  it("keeps ChatGPT subscription traffic off Cloudflare AI Gateways", async () => {
+    const payload = btoa(JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "chatgpt-account" },
+    }));
+    const handle = getModel(env(), {
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      apiToken: `header.${payload}.signature`,
+    }, INITIATOR, {
+      userGateway: { accountId: "cloudflare-account", apiKey: "gateway-token" },
+    });
+
+    expect(handle.model.api).toBe("openai-codex-responses");
+    expect(handle.model.baseUrl).toBe("https://chatgpt.com/backend-api");
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(request.headers.get("authorization")).toBe(`Bearer header.${payload}.signature`);
+    expect(request.headers.get("chatgpt-account-id")).toBe("chatgpt-account");
+    expect(request.headers.get("cf-aig-authorization")).toBeNull();
+  }, 15000);
+
+  it("keeps the ChatGPT picker synchronized with pi's pinned Codex catalog", () => {
+    expect(Object.keys(SUGGESTED_MODELS["openai-codex"]).toSorted())
+        .toEqual(Object.keys(OPENAI_CODEX_MODELS).toSorted());
+  });
 
   it("uses the config's own account and token for direct Workers AI", async () => {
     // Outside gateway mode, Workers AI is BYOK like any other provider: credentials come from

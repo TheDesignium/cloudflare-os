@@ -12,6 +12,8 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import type { OAuthCredential } from "@earendil-works/pi-ai";
+import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -71,6 +73,38 @@ export type UserChatContext = {
   profile: AiChatAuthorInfo;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
+}
+
+const CHATGPT_PROVIDER = "openai-codex" as const;
+const CHATGPT_MODEL_ID_PREFIX = `${CHATGPT_PROVIDER}:`;
+const CHATGPT_REFRESH_WINDOW_MS = 5 * 60 * 1000;
+const chatGptOAuth = openaiCodexProvider().auth.oauth!;
+
+function chatGptModelRecord(modelId: string): UserAiModelRecord {
+  let model = SUGGESTED_MODELS[CHATGPT_PROVIDER][modelId];
+  if (!model) throw new Error(`Unsupported ChatGPT model: ${modelId}`);
+  return {
+    profile: {
+      type: "agent",
+      id: `${CHATGPT_MODEL_ID_PREFIX}${modelId}`,
+      name: model.name,
+    },
+    config: {
+      provider: CHATGPT_PROVIDER,
+      model: modelId,
+      // OAuth credentials live in their own user-scoped record. A current access token is only
+      // injected into the short-lived config copy returned from getChatContext().
+      apiToken: "",
+    },
+  };
+}
+
+function validateChatGptCredential(credential: OAuthCredential): void {
+  if (credential.type !== "oauth" || typeof credential.access !== "string" ||
+      typeof credential.refresh !== "string" || typeof credential.expires !== "number" ||
+      !Number.isFinite(credential.expires)) {
+    throw new Error("OpenAI returned an invalid ChatGPT credential.");
+  }
 }
 
 type LoginSessionRecord = {
@@ -211,6 +245,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // count. Folds the former standalone RateLimitDO into the user object.
       dailyLlmCount: <{ day: string; count: number } | null>null,
 
+      // One ChatGPT subscription credential is shared by all of this user's OpenAI Codex models.
+      // Access tokens are never copied into the persisted aiModels collection.
+      chatGptCredential: <OAuthCredential | null>null,
+
       // `passwordHash` value as passed to `login()`, but with an extra round of SHA-256 applied.
       //
       // null = password disabled (e.g. because some other auth mechanism is used)
@@ -277,6 +315,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  private chatGptRefresh: Promise<OAuthCredential> | null = null;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -525,6 +564,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    if (config.provider === CHATGPT_PROVIDER) {
+      throw new Error("ChatGPT models must be added through device-code sign-in.");
+    }
     let gwConfig = getAiGatewayConfig(this.env);
     if (gwConfig && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
@@ -532,6 +574,75 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     profile.type = "agent";
     this.storage.aiModels.put({profile, config});
+  }
+
+  // Try the no-interaction path used by ChatGptModelAddAttemptImpl. A credential that is missing
+  // or cannot be refreshed returns false so the caller can fall back to device authorization.
+  async tryAddChatGptModel(modelId: string): Promise<boolean> {
+    chatGptModelRecord(modelId);  // Validate before inspecting any credential state.
+    if (!this.storage.chatGptCredential.get()) return false;
+    try {
+      await this.#getUsableChatGptCredential();
+    } catch {
+      return false;
+    }
+    this.storage.aiModels.put(chatGptModelRecord(modelId));
+    return true;
+  }
+
+  // Complete a successful device authorization. This is called only by the authenticated server
+  // capability; the browser never receives the credential.
+  async finishChatGptModelAdd(modelId: string, credential: OAuthCredential): Promise<void> {
+    let record = chatGptModelRecord(modelId);
+    validateChatGptCredential(credential);
+    this.storage.chatGptCredential.put(credential);
+    this.storage.aiModels.put(record);
+  }
+
+  async #getUsableChatGptCredential(): Promise<OAuthCredential> {
+    let credential = this.storage.chatGptCredential.get();
+    if (!credential) {
+      throw new Error(
+          "ChatGPT is not connected. Re-add the ChatGPT model to sign in again.");
+    }
+    if (credential.expires > Date.now() + CHATGPT_REFRESH_WINDOW_MS) return credential;
+
+    // Durable Object requests may interleave while awaiting fetch(). Keep a per-instance promise
+    // so a rotated refresh token is consumed exactly once.
+    let refresh = this.chatGptRefresh;
+    if (!refresh) {
+      refresh = (async () => {
+        let latest = this.storage.chatGptCredential.get();
+        if (!latest) {
+          throw new Error("ChatGPT is not connected.");
+        }
+        if (latest.expires > Date.now() + CHATGPT_REFRESH_WINDOW_MS) return latest;
+        let refreshed = await chatGptOAuth.refresh(latest);
+        validateChatGptCredential(refreshed);
+        this.storage.chatGptCredential.put(refreshed);
+        return refreshed;
+      })();
+      this.chatGptRefresh = refresh;
+    }
+
+    try {
+      return await refresh;
+    } catch {
+      // Preserve the stored refresh token: a transient upstream failure may succeed on retry.
+      throw new Error(
+          "ChatGPT authentication could not be refreshed. Re-add the ChatGPT model to reconnect.");
+    } finally {
+      if (this.chatGptRefresh === refresh) this.chatGptRefresh = null;
+    }
+  }
+
+  async #resolveChatGptModel(record: UserAiModelRecord): Promise<UserAiModelRecord> {
+    if (record.config.provider !== CHATGPT_PROVIDER) return record;
+    let credential = await this.#getUsableChatGptCredential();
+    return {
+      profile: record.profile,
+      config: {...record.config, apiToken: credential.access},
+    };
   }
 
   async deleteModel(id: string): Promise<void> {
@@ -678,6 +789,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         result.aiModel = this.storage.aiModels.get(modelId);
       }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
+      result.aiModel = await this.#resolveChatGptModel(result.aiModel);
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
@@ -689,7 +801,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (quickModelId) {
         let quickModel = this.storage.aiModels.get(quickModelId);
         if (quickModel) {
-          result.quickModel = quickModel.config;
+          result.quickModel = (await this.#resolveChatGptModel(quickModel)).config;
         }
       }
     }

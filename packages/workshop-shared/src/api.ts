@@ -40,6 +40,28 @@ export interface LoginAttempt extends RpcTarget {
   wait(): Promise<string>;
 }
 
+/** A ChatGPT device-code challenge shown while adding an OpenAI Codex model. */
+export type ChatGptDeviceCode = {
+  /** One-time code the user enters on the verification page. */
+  userCode: string;
+  /** OpenAI page where the user completes the device authorization. */
+  verificationUri: string;
+  /** Number of seconds before the device-code attempt expires. */
+  expiresInSeconds: number;
+};
+
+/** Browser callback invoked when a ChatGPT model-add attempt obtains its device code. */
+export interface ChatGptModelAddCallbacks extends RpcTarget {
+  /** Supplies the challenge that the UI opens and renders while the server polls. */
+  onDeviceCode(challenge: ChatGptDeviceCode): void;
+}
+
+/** A pending ChatGPT-authenticated model addition; dispose the stub to cancel it. */
+export interface ChatGptModelAddAttempt extends RpcTarget {
+  /** Reuses a valid user credential or completes device authorization before adding the model. */
+  wait(callbacks: RpcStub<ChatGptModelAddCallbacks>): Promise<void>;
+}
+
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
   // Returns deployment-level configuration the client needs at boot (auth mode, available sign-in
@@ -338,6 +360,10 @@ export interface AuthenticatedApi extends RpcTarget {
   // Adds a new model to the user's configured set. The ID must be unique among the user's
   // configured models.
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
+
+  // Adds a model backed by the user's ChatGPT subscription. The returned capability performs the
+  // device-code flow when no reusable credential is available; dispose it to cancel the attempt.
+  startChatGptModelAdd(modelId: string): Promise<RpcStub<ChatGptModelAddAttempt>>;
 
   // Deletes a configured model.
   deleteModel(id: string): Promise<void>;
@@ -944,7 +970,8 @@ export type CloudflareAccountOption = {
 };
 
 // Supported AI providers.
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider =
+    "openai" | "openai-codex" | "anthropic" | "google" | "cloudflare" | "ollama";
 
 // Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`.
 export type AiGatewayInfo = {
@@ -1006,6 +1033,15 @@ export const SUGGESTED_MODELS: Record<
     "gpt-5.6-sol": {name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000},
     "gpt-5.6-luna": {name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000},
     "gpt-5.6-terra": {name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000},
+  },
+  "openai-codex": {
+    "gpt-5.3-codex-spark": {name: "GPT-5.3 Codex Spark", contextWindow: 128000},
+    "gpt-5.4": {name: "GPT-5.4", contextWindow: 272000},
+    "gpt-5.4-mini": {name: "GPT-5.4 mini", contextWindow: 272000},
+    "gpt-5.5": {name: "GPT-5.5", contextWindow: 272000},
+    "gpt-5.6-luna": {name: "GPT-5.6 Luna", contextWindow: 272000},
+    "gpt-5.6-sol": {name: "GPT-5.6 Sol", contextWindow: 272000},
+    "gpt-5.6-terra": {name: "GPT-5.6 Terra", contextWindow: 272000},
   },
   "google": {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},

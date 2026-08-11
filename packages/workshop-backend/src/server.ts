@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, ChatGptModelAddAttempt, ChatGptModelAddCallbacks, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, SUGGESTED_MODELS, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -28,8 +28,80 @@ import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
+import type { AuthInteraction } from "@earendil-works/pi-ai";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 
 const logger = createWorkshopLogger("workshop.server");
+
+// pi keeps OAuth flows behind a bundler-opaque dynamic import. Register its static bundle so the
+// OpenAI device-code implementation is present in the single-module Cloudflare Worker upload.
+registerBunOAuthFlows();
+
+@validateRpc()
+class ChatGptModelAddAttemptImpl extends RpcTarget implements ChatGptModelAddAttempt {
+  readonly #abort = new AbortController();
+  #started = false;
+
+  constructor(private user: DurableObjectStub<UserDurableObject>, private modelId: string) {
+    super();
+  }
+
+  [Symbol.dispose](): void {
+    this.#abort.abort();
+  }
+
+  async wait(callbacks: RpcStub<ChatGptModelAddCallbacks>): Promise<void> {
+    if (this.#started) throw new Error("This ChatGPT model-add attempt has already started.");
+    this.#started = true;
+
+    if (await this.user.tryAddChatGptModel(this.modelId)) return;
+
+    const oauth = openaiCodexProvider().auth.oauth!;
+    const interaction: AuthInteraction = {
+      signal: this.#abort.signal,
+      prompt: async (prompt) => {
+        if (prompt.type === "select") return "device_code";
+        throw new Error(`Unexpected ChatGPT login prompt: ${prompt.type}`);
+      },
+      notify: (event) => {
+        if (event.type !== "device_code") return;
+        // If the browser connection disappears, abort the bounded polling loop instead of keeping
+        // it alive until the fifteen-minute device-code deadline.
+        void callbacks.onDeviceCode({
+          userCode: event.userCode,
+          verificationUri: event.verificationUri,
+          expiresInSeconds: event.expiresInSeconds ?? 15 * 60,
+        }).catch(() => this.#abort.abort());
+      },
+    };
+
+    try {
+      let credential = await oauth.login(interaction);
+      if (this.#abort.signal.aborted) throw new Error("Login cancelled");
+      await this.user.finishChatGptModelAdd(this.modelId, credential);
+    } catch (error) {
+      if (this.#abort.signal.aborted) {
+        // oxlint-disable-next-line eslint/preserve-caught-error -- Never expose OAuth endpoint details over RPC.
+        throw new Error("ChatGPT sign-in was cancelled.");
+      }
+      let message = error instanceof Error ? error.message : "";
+      if (message.includes("not enabled")) {
+        // oxlint-disable-next-line eslint/preserve-caught-error -- Never expose OAuth endpoint details over RPC.
+        throw new Error(
+            "ChatGPT device-code login is not enabled. Enable it in ChatGPT security or " +
+            "workspace settings, then try again.");
+      }
+      if (/timed? out|timeout/i.test(message)) {
+        // oxlint-disable-next-line eslint/preserve-caught-error -- Never expose OAuth endpoint details over RPC.
+        throw new Error("ChatGPT sign-in timed out. Start the connection again.");
+      }
+      // Do not forward token-endpoint response bodies to browser logs or error reporting.
+      // oxlint-disable-next-line eslint/preserve-caught-error -- Never expose OAuth endpoint details over RPC.
+      throw new Error("ChatGPT sign-in failed. Please try again.");
+    }
+  }
+}
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
@@ -123,6 +195,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     return this.user.addModel(profile, config);
+  }
+  async startChatGptModelAdd(modelId: string): Promise<RpcStub<ChatGptModelAddAttempt>> {
+    if (!(modelId in SUGGESTED_MODELS["openai-codex"])) {
+      throw new Error(`Unsupported ChatGPT model: ${modelId}`);
+    }
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
+    //     system doesn't know this.
+    return new ChatGptModelAddAttemptImpl(this.user, modelId);
   }
   deleteModel(id: string): Promise<void> {
     return this.user.deleteModel(id);

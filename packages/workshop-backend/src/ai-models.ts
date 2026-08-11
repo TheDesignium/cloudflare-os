@@ -7,11 +7,13 @@ import type {
 import { stream as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as googleGenerativeAiStream } from "@earendil-works/pi-ai/api/google-generative-ai";
 import { stream as openaiCompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
+import { stream as openaiCodexResponsesStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
@@ -109,6 +111,8 @@ function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataCon
 const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
   "anthropic-messages": anthropicMessagesStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-responses": openaiResponsesStream as StreamFunction<Api, SimpleStreamOptions>,
+  "openai-codex-responses":
+      openaiCodexResponsesStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-completions": openaiCompletionsStream as StreamFunction<Api, SimpleStreamOptions>,
   "google-generative-ai": googleGenerativeAiStream as StreamFunction<Api, SimpleStreamOptions>,
 };
@@ -121,6 +125,8 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
   switch (provider) {
     case "anthropic": return (ANTHROPIC_MODELS as Record<string, Model<Api>>)[modelId];
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
+    case "openai-codex":
+      return (OPENAI_CODEX_MODELS as Record<string, Model<Api>>)[modelId];
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
@@ -281,7 +287,8 @@ function makeHandle(args: HandleArgs): ModelHandle {
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
-      args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
+      args.model.api === "openai-responses" || args.model.api === "openai-codex-responses"
+          ? { reasoningEffort: "medium" } : {};
 
   const handle: ModelHandle = {
     model: args.model,
@@ -306,6 +313,11 @@ function makeHandle(args: HandleArgs): ModelHandle {
             ? apiExtras
             : args.model.api === "anthropic-messages" ? { thinkingEnabled: false } : {}),
         ...options,
+        // pi's Codex "auto" transport probes WebSocket first. Cloudflare Workers' WebSocket
+        // constructor does not accept the Node-style headers option used by that probe, so use
+        // the equally supported SSE transport for this runtime. Keep this after call options so
+        // callers cannot accidentally re-enable the incompatible probe.
+        ...(args.model.api === "openai-codex-responses" ? { transport: "sse" as const } : {}),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
@@ -342,6 +354,12 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // ChatGPT subscription traffic authenticates directly to the Codex backend. It must never be
+  // rewritten to a Cloudflare AI Gateway route, even when the user or deployment has one enabled.
+  if (config.provider === "openai-codex") {
+    return getModelDirect(config, options.sessionAffinity);
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -587,6 +605,18 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         apiKey: config.apiToken,
         sessionAffinity,
       });
+    case "openai-codex": {
+      if (!catalog) throw new Error(`Unsupported ChatGPT model: ${config.model}`);
+      return makeHandle({
+        model: {
+          ...catalog,
+          baseUrl: "https://chatgpt.com/backend-api",
+          ...window,
+        },
+        apiKey: config.apiToken,
+        sessionAffinity,
+      });
+    }
     default:
       config.provider satisfies never;
       throw new Error(`Unknown provider "${config.provider}".`);
@@ -595,9 +625,11 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
 
 // =======================================================================================
 
+/** Construction properties for a persistent model binding gatekeeper. */
 export type LanguageModelGatekeeperProps = {
   displayName: string,
   config: AiModelConfig,
+  credentialSource?: {userId: string, modelId: string},
   initiator: AiChatAuthorInfo,
   metadata?: GatewayMetadataContext,
 };
@@ -632,7 +664,16 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
+    let config = this.ctx.props.config;
+    let source = this.ctx.props.credentialSource;
+    if (source) {
+      let users = this.ctx.exports.UserDurableObject;
+      let user = users.get(users.idFromString(source.userId));
+      let context = await user.getChatContext(source.modelId);
+      if (!context.aiModel) throw new Error(`No such model: ${source.modelId}`);
+      config = context.aiModel.config;
+    }
+    let model = getModel(this.env, config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });
     return new LanguageModelBindingImpl(model);

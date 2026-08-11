@@ -7478,9 +7478,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
     let chatMeta = await this.clientUser.getChatContext(modelId);
+    let chatConfig = chatMeta.aiModel!.config;
+    let usesChatGpt = chatConfig.provider === "openai-codex";
     let props: LanguageModelGatekeeperProps = {
       displayName: chatMeta.aiModel!.profile.name,
-      config: chatMeta.aiModel!.config,
+      // Never snapshot an OAuth access token into persistent gatekeeper props. The gatekeeper uses
+      // the user/model reference below to resolve a current token each time a session starts.
+      config: usesChatGpt ? {...chatConfig, apiToken: ""} : chatConfig,
+      ...(usesChatGpt ? {credentialSource: {
+        userId: this.clientUser.id.toString(),
+        modelId,
+      }} : {}),
       initiator: {
         type: "gadget",
         id: chatMeta.profile.id,
@@ -7492,8 +7500,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let creationSpec: GatekeeperCreationSpec = {
       type: "aiModel",
       modelId,
-      provider: chatMeta.aiModel!.config.provider,
-      modelName: chatMeta.aiModel!.config.model,
+      provider: chatConfig.provider,
+      modelName: chatConfig.model,
     };
 
     let result = await this.impl.addGatekeeper(
