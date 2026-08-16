@@ -101,6 +101,16 @@ describe("compaction trigger", () => {
     expect(getModelTokenLimits({
       provider: "anthropic", model: "claude-opus-5", apiToken: "",
     })).toEqual({inputBudget: 1_000_000, maxOutputTokens: undefined});
+
+    // Mantle exposes the same input-only context plus an explicit response cap.
+    expect(getModelTokenLimits({
+      provider: "bedrock-mantle", model: "anthropic.claude-opus-4-8", apiToken: "",
+    })).toEqual({inputBudget: 1_000_000, maxOutputTokens: 128_000});
+
+    // GPT-5.6 Sol's response shares its smaller Bedrock context window.
+    expect(getModelTokenLimits({
+      provider: "bedrock-mantle", model: "openai.gpt-5.6-sol", apiToken: "",
+    })).toEqual({inputBudget: 144_000, maxOutputTokens: 128_000});
   });
 
   // Workers AI rejects a request whose prompt and response cap together exceed the window, so a
@@ -112,6 +122,11 @@ describe("compaction trigger", () => {
     // Other providers fall back to the assumed window with nothing withheld.
     expect(getModelTokenLimits({provider: "ollama", model: "local", apiToken: ""}))
         .toEqual({inputBudget: 128_000, maxOutputTokens: undefined});
+
+    expect(getModelTokenLimits({
+      provider: "bedrock-mantle", model: "anthropic.custom-model", apiToken: "",
+      maxTokens: 96_000,
+    })).toEqual({inputBudget: 1_000_000, maxOutputTokens: 96_000});
   });
 
   it("recognizes /compact as the newest message, and only there", () => {

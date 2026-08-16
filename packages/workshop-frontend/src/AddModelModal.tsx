@@ -1,6 +1,14 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import {
+  AiChatAuthorInfo,
+  AiModelConfig,
+  AiModelProvider,
+  AiGatewayInfo,
+  BedrockMantleApi,
+  BEDROCK_MANTLE_APIS,
+  SUGGESTED_MODELS,
+} from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
@@ -18,6 +26,7 @@ type SelectionType =
 
 const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   anthropic: 'Anthropic',
+  'bedrock-mantle': 'Bedrock Mantle',
   openai: 'OpenAI',
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
@@ -27,6 +36,7 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
 // Placeholder hinting at the shape of each provider's API token.
 const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   anthropic: 'sk-ant-...',
+  'bedrock-mantle': 'Configured by the deployment',
   openai: 'sk-...',
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
@@ -98,6 +108,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
   // Form fields (used for custom models)
   const [modelId, setModelId] = useState('')
+  const [maxTokens, setMaxTokens] = useState('')
+  const [bedrockMantleApi, setBedrockMantleApi] = useState<BedrockMantleApi | undefined>()
   const [displayName, setDisplayName] = useState('')
   const [apiToken, setApiToken] = useState('')
   const [accountId, setAccountId] = useState('')
@@ -120,6 +132,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setSelection(null)
       setSelectValue(undefined)
       setModelId('')
+      setMaxTokens('')
+      setBedrockMantleApi(undefined)
       setDisplayName('')
       setApiToken('')
       setAccountId('')
@@ -137,9 +151,17 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     if (sel.type === 'custom') {
       setModelId('')
+      setMaxTokens('')
+      setBedrockMantleApi(undefined)
       setDisplayName('')
     } else {
       setModelId(sel.modelId)
+      setMaxTokens('')
+      setBedrockMantleApi(
+        sel.provider === 'bedrock-mantle'
+          ? SUGGESTED_MODELS[sel.provider][sel.modelId].bedrockMantleApi
+          : undefined,
+      )
       setDisplayName(sel.displayName)
     }
     setApiToken('')
@@ -157,13 +179,25 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     if (selection?.type === 'custom') {
       if (!modelId.trim()) newErrors.modelId = 'Please enter the model ID'
       if (!displayName.trim()) newErrors.displayName = 'Please enter a display name'
+      if (selection.provider === 'bedrock-mantle') {
+        const parsedMaxTokens = Number(maxTokens)
+        if (!/^\d+$/.test(maxTokens.trim()) ||
+            !Number.isSafeInteger(parsedMaxTokens) || parsedMaxTokens <= 0) {
+          newErrors.maxTokens = 'Please enter a positive whole number'
+        }
+      }
     }
 
     const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
+    const isBedrockMantle = selection?.provider === 'bedrock-mantle'
     const showCredentials = !gatewayMode
 
-    if (showCredentials && selection && !isOllama && !apiToken.trim()) {
+    if (isBedrockMantle && !bedrockMantleApi) {
+      newErrors.bedrockMantleApi = 'Please select the Mantle API endpoint'
+    }
+
+    if (showCredentials && selection && !isOllama && !isBedrockMantle && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
     }
 
@@ -197,7 +231,13 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       const config: AiModelConfig = {
         provider: selection!.provider,
         model: finalModelId,
-        apiToken: gatewayMode ? '' : apiToken.trim(),
+        apiToken: gatewayMode || selection!.provider === 'bedrock-mantle' ? '' : apiToken.trim(),
+        ...(selection!.type === 'custom' && selection!.provider === 'bedrock-mantle' && {
+          maxTokens: Number(maxTokens),
+        }),
+        ...(selection!.provider === 'bedrock-mantle' && {
+          bedrockMantleApi: bedrockMantleApi!,
+        }),
         ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
         ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
       }
@@ -218,6 +258,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
+  const isBedrockMantle = selection?.provider === 'bedrock-mantle'
   const showCredentials = !gatewayMode
 
   // Group options by provider for rendering with visual separators.
@@ -282,8 +323,66 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                 variant={errors.modelId ? 'error' : 'default'}
               />
 
+              {isBedrockMantle && (
+                <>
+                  <Select
+                    label="Mantle API Endpoint"
+                    className="w-full text-sm"
+                    placeholder="Choose the API endpoint..."
+                    value={bedrockMantleApi}
+                    onValueChange={(value) => {
+                      setBedrockMantleApi(value as BedrockMantleApi)
+                      setErrors(prev => ({ ...prev, bedrockMantleApi: '' }))
+                    }}
+                    error={errors.bedrockMantleApi}
+                    renderValue={(value) => {
+                      const api = BEDROCK_MANTLE_APIS[value as BedrockMantleApi]
+                      return api ? `${api.name} (${api.path})` : String(value)
+                    }}
+                  >
+                    {(Object.entries(BEDROCK_MANTLE_APIS) as [
+                      BedrockMantleApi,
+                      {name: string, path: string},
+                    ][]).map(([value, api]) => (
+                      <Select.Option key={value} value={value}>
+                        {api.name} ({api.path})
+                      </Select.Option>
+                    ))}
+                  </Select>
+
+                  <Input
+                    label="Max Tokens"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="e.g., 128000"
+                    description={(
+                      <>
+                        Maximum output token request cap. Check the model's API, regional
+                        availability, and output limit in the{' '}
+                        <a
+                          className="underline"
+                          href="https://docs.aws.amazon.com/bedrock/latest/userguide/models.html"
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          AWS Bedrock model catalog
+                        </a>.
+                      </>
+                    )}
+                    value={maxTokens}
+                    onChange={(e) => {
+                      setMaxTokens(e.target.value)
+                      setErrors(prev => ({ ...prev, maxTokens: '' }))
+                    }}
+                    error={errors.maxTokens}
+                    variant={errors.maxTokens ? 'error' : 'default'}
+                  />
+                </>
+              )}
+
               <Input
-                label="Display Name"
+                label={isBedrockMantle ? 'Model Name' : 'Display Name'}
                 placeholder={`e.g., ${example!.name}`}
                 description="Human-readable name shown in the UI"
                 value={displayName}
@@ -308,7 +407,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           )}
 
           {/* API Token */}
-          {showCredentials && selection && (
+          {showCredentials && selection && !isBedrockMantle && (
             <SensitiveInput
               label="API Token"
               placeholder={API_TOKEN_PLACEHOLDERS[selection.provider]}
@@ -340,7 +439,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           )}
 
           {/* Advanced Settings for non-Ollama, non-Cloudflare providers */}
-          {showCredentials && selection && !isOllama && !isCloudflare && (
+          {showCredentials && selection && !isOllama && !isCloudflare && !isBedrockMantle && (
             <Collapsible.Root
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}

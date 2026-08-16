@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, BEDROCK_MANTLE_APIS, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -551,6 +551,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let gwConfig = getAiGatewayConfig(this.env);
     if (gwConfig && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
+    }
+
+    if (config.provider === "bedrock-mantle") {
+      let suggested = SUGGESTED_MODELS[config.provider][config.model];
+      if (!config.bedrockMantleApi || !Object.prototype.hasOwnProperty.call(
+          BEDROCK_MANTLE_APIS, config.bedrockMantleApi)) {
+        throw new Error("A Bedrock Mantle API endpoint selection is required.");
+      }
+      if (!suggested && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens! <= 0)) {
+        throw new Error("A positive whole maxTokens value is required for a custom Bedrock Mantle model.");
+      }
+      // Mantle credentials and routing are deployment-owned. Never persist client-supplied
+      // alternatives, even if a caller bypasses the frontend.
+      config.apiToken = "";
+      delete config.apiUrl;
+      delete config.accountId;
+      if (suggested) delete config.maxTokens;
+      profile.id = config.model;
     }
 
     profile.type = "agent";

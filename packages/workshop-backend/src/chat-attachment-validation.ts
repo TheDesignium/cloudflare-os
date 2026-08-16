@@ -34,6 +34,7 @@ const isTextImageOrPdfMime = (mimeType: string) =>
 // chat-attachment-pdf.ts). Workers AI and Ollama chat endpoints have no document input at all.
 const ATTACHMENT_SUPPORT_BY_PROVIDER = {
   anthropic: isTextImageOrPdfMime,
+  "bedrock-mantle": isTextImageOrPdfMime,
   openai: isTextImageOrPdfMime,
   google: isTextImageOrPdfMime,
   cloudflare: isTextOrImageMime,

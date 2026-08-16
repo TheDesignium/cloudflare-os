@@ -1137,7 +1137,37 @@ export type CloudflareAccountOption = {
 };
 
 /** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider =
+    "openai" | "anthropic" | "bedrock-mantle" | "google" | "cloudflare" | "ollama";
+
+/**
+ * Bedrock Mantle exposes multiple wire-compatible APIs at different paths. This value is stored
+ * with every Mantle model so inference never has to guess an endpoint from the model ID.
+ */
+export type BedrockMantleApi =
+    "anthropic-messages" |
+    "openai-responses" |
+    "openai-responses-namespaced" |
+    "openai-chat-completions";
+
+/** Display metadata for each Bedrock Mantle wire-compatible API endpoint. */
+export const BEDROCK_MANTLE_APIS: Record<
+  BedrockMantleApi,
+  {name: string, path: string}
+> = {
+  "anthropic-messages": {
+    name: "Anthropic Messages", path: "/anthropic/v1/messages",
+  },
+  "openai-responses": {
+    name: "OpenAI Responses", path: "/v1/responses",
+  },
+  "openai-responses-namespaced": {
+    name: "OpenAI Responses (OpenAI namespace)", path: "/openai/v1/responses",
+  },
+  "openai-chat-completions": {
+    name: "OpenAI Chat Completions", path: "/v1/chat/completions",
+  },
+};
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
@@ -1155,8 +1185,23 @@ export type AiModelConfig = {
   /** Name of the specific model, as specified to the provider's API. */
   model: string;
 
-  /** Secret API token for the respective provider, for billing purposes. */
+  /**
+   * Secret API token for the respective provider, for billing purposes. Empty for provider
+   * "bedrock-mantle", whose deployment-wide token comes from the Worker env.
+   */
   apiToken: string;
+
+  /**
+   * Maximum response tokens to request. Currently user-configurable for custom Bedrock Mantle
+   * models; suggested models declare their own value in SUGGESTED_MODELS.
+   */
+  maxTokens?: number;
+
+  /**
+   * Required for provider "bedrock-mantle". Stored even for suggested models so direct routing
+   * depends only on this explicit selection, never on a model-ID heuristic.
+   */
+  bedrockMantleApi?: BedrockMantleApi;
 
   /**
    * Cloudflare account ID owning the Workers AI deployment the token authorizes. Required for
@@ -1180,12 +1225,20 @@ export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 
 /**
  * Models offered in the picker. `contextWindow` is the maximum tokens one request may total.
+ * `maxTokens`, when present, is the requested response cap for providers whose published context
+ * window is input-only.
  * `outputLimit`, when present, is both the requested response cap and the space reserved for it,
  * leaving the remainder as the prompt budget context compaction sizes against.
  */
 export const SUGGESTED_MODELS: Record<
   AiModelProvider,
-  Record<string, {name: string, contextWindow: number, outputLimit?: number}>
+  Record<string, {
+    name: string,
+    contextWindow: number,
+    maxTokens?: number,
+    outputLimit?: number,
+    bedrockMantleApi?: BedrockMantleApi,
+  }>
 > = {
   "cloudflare": {
     "@cf/moonshotai/kimi-k2.7-code": {
@@ -1202,6 +1255,20 @@ export const SUGGESTED_MODELS: Record<
     "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000},
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
+  },
+  "bedrock-mantle": {
+    "anthropic.claude-sonnet-5": {
+      name: "Claude Sonnet 5 (Bedrock Mantle)", contextWindow: 1000000, maxTokens: 128000,
+      bedrockMantleApi: "anthropic-messages",
+    },
+    "openai.gpt-5.6-sol": {
+      name: "GPT-5.6 Sol (Bedrock Mantle)", contextWindow: 272000, outputLimit: 128000,
+      bedrockMantleApi: "openai-responses-namespaced",
+    },
+    "anthropic.claude-opus-4-8": {
+      name: "Claude Opus 4.8 (Bedrock Mantle)", contextWindow: 1000000, maxTokens: 128000,
+      bedrockMantleApi: "anthropic-messages",
+    },
   },
   "openai": {
     "gpt-5.6-sol": {name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000},

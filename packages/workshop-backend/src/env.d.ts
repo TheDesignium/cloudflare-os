@@ -24,6 +24,11 @@ declare global {
       // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
       // provider -- the account ID and API token live in the user's model config, not in env.
 
+      // Bedrock Mantle uses one deployment-wide long-term API key. Inference is fixed to
+      // us-east-1 in ai-models.ts so every suggested model is available.
+      // The key is sent only as an Authorization bearer token and is never stored in user config.
+      AWS_BEARER_TOKEN_BEDROCK?: string;
+
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
       BLUEPRINT_CONTENT: R2Bucket;         // R2 bucket for blueprint code snapshots

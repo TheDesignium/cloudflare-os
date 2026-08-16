@@ -32,6 +32,13 @@ const WORKERS_AI_CONFIG: AiModelConfig = {
   apiToken: "ignored-in-gateway-mode",
 };
 
+const BEDROCK_MANTLE_CONFIG: AiModelConfig = {
+  provider: "bedrock-mantle",
+  model: "anthropic.claude-sonnet-5",
+  apiToken: "",
+  bedrockMantleApi: "anthropic-messages",
+};
+
 function env(overrides: Partial<Cloudflare.Env> = {}): Cloudflare.Env {
   return {
     CF_AI_GATEWAY: "platform-gateway",
@@ -55,10 +62,11 @@ const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // Runs one request through the handle with the fetch stub and returns what was sent.
-async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
+async function captureRequest(handle: ModelHandle, options: { maxTokens?: number } = {})
+    : Promise<CapturedRequest> {
   const stream = await handle.stream(handle.model, {
     messages: [{ role: "user", content: "hello", timestamp: 0 }],
-  }, { fetch: fetchStub, maxRetries: 0 });
+  }, { fetch: fetchStub, maxRetries: 0, ...options });
   const message = await stream.result();
   expect(message.stopReason).toBe("error");
   expect(capturedRequests.length).toBeGreaterThan(0);
@@ -418,6 +426,132 @@ describe("getModel direct routing (no gateway)", () => {
     expect(request.headers.get("x-api-key")).toBe("direct-api-token");
     expect(request.headers.get("cf-aig-metadata")).toBeNull();
   }, 15000);
+
+  it("uses deployment credentials for Bedrock Mantle's Anthropic Messages endpoint", async () => {
+    const handle = getModel(env({
+      CF_AI_GATEWAY: undefined,
+      AWS_BEARER_TOKEN_BEDROCK: "bedrock-api-key",
+    }), BEDROCK_MANTLE_CONFIG, INITIATOR);
+
+    expect(handle.model.api).toBe("anthropic-messages");
+    expect(handle.model.id).toBe("anthropic.claude-sonnet-5");
+    expect(handle.model.baseUrl).toBe(
+        "https://bedrock-mantle.us-east-1.api.aws/anthropic");
+    expect(handle.model.contextWindow).toBe(1_000_000);
+    expect(handle.model.maxTokens).toBe(128_000);
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe(
+        "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages");
+    expect(request.headers.get("authorization")).toBe("Bearer bedrock-api-key");
+    expect(request.headers.get("x-api-key")).toBeNull();
+    const body = JSON.parse(request.body) as { model: string; max_tokens: number };
+    expect(body.model).toBe("anthropic.claude-sonnet-5");
+    expect(body.max_tokens).toBe(128_000);
+  }, 15000);
+
+  it("uses Bedrock Mantle's OpenAI Responses endpoint for GPT-5.6 Sol", async () => {
+    const handle = getModel(env({
+      CF_AI_GATEWAY: undefined,
+      AWS_BEARER_TOKEN_BEDROCK: "bedrock-api-key",
+    }), {
+      provider: "bedrock-mantle",
+      model: "openai.gpt-5.6-sol",
+      apiToken: "",
+      bedrockMantleApi: "openai-responses-namespaced",
+    }, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-responses");
+    expect(handle.model.id).toBe("openai.gpt-5.6-sol");
+    expect(handle.model.baseUrl).toBe(
+        "https://bedrock-mantle.us-east-1.api.aws/openai/v1");
+    expect(handle.model.contextWindow).toBe(272_000);
+    expect(handle.model.maxTokens).toBe(128_000);
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle, { maxTokens: handle.model.maxTokens });
+    expect(request.url).toBe(
+        "https://bedrock-mantle.us-east-1.api.aws/openai/v1/responses");
+    expect(request.headers.get("authorization")).toBe("Bearer bedrock-api-key");
+    expect(request.headers.get("x-api-key")).toBeNull();
+    const body = JSON.parse(request.body) as { model: string; max_output_tokens: number };
+    expect(body.model).toBe("openai.gpt-5.6-sol");
+    expect(body.max_output_tokens).toBe(128_000);
+  }, 15000);
+
+  it("requires a stored API selection instead of guessing from a custom model ID", () => {
+    expect(() => getModel(env({
+      CF_AI_GATEWAY: undefined,
+      AWS_BEARER_TOKEN_BEDROCK: "bedrock-api-key",
+    }), {
+      provider: "bedrock-mantle",
+      model: "openai.gpt-oss-120b",
+      apiToken: "",
+      maxTokens: 16_000,
+    }, INITIATOR)).toThrow("A Bedrock Mantle API endpoint selection is required");
+  });
+
+  it("uses the configured maxTokens for a custom Bedrock Mantle model", async () => {
+    const handle = getModel(env({
+      CF_AI_GATEWAY: undefined,
+      AWS_BEARER_TOKEN_BEDROCK: "bedrock-api-key",
+    }), {
+      provider: "bedrock-mantle",
+      model: "anthropic.custom-model",
+      apiToken: "",
+      maxTokens: 64_000,
+      bedrockMantleApi: "anthropic-messages",
+    }, INITIATOR);
+
+    expect(handle.model.maxTokens).toBe(64_000);
+    const request = await captureRequest(handle);
+    expect((JSON.parse(request.body) as { max_tokens: number }).max_tokens).toBe(64_000);
+  }, 15000);
+
+  it("uses the explicitly selected standard OpenAI Responses endpoint", async () => {
+    const handle = getModel(env({
+      CF_AI_GATEWAY: undefined,
+      AWS_BEARER_TOKEN_BEDROCK: "bedrock-api-key",
+    }), {
+      provider: "bedrock-mantle",
+      model: "custom-responses-model",
+      apiToken: "",
+      maxTokens: 16_000,
+      bedrockMantleApi: "openai-responses",
+    }, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-responses");
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("https://bedrock-mantle.us-east-1.api.aws/v1/responses");
+    expect(request.headers.get("authorization")).toBe("Bearer bedrock-api-key");
+    expect((JSON.parse(request.body) as { model: string }).model).toBe("custom-responses-model");
+  }, 15000);
+
+  it("uses the explicitly selected OpenAI Chat Completions endpoint", async () => {
+    const handle = getModel(env({
+      CF_AI_GATEWAY: undefined,
+      AWS_BEARER_TOKEN_BEDROCK: "bedrock-api-key",
+    }), {
+      provider: "bedrock-mantle",
+      model: "custom-chat-model",
+      apiToken: "",
+      maxTokens: 16_000,
+      bedrockMantleApi: "openai-chat-completions",
+    }, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-completions");
+    const request = await captureRequest(handle);
+    expect(request.url).toBe(
+        "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions");
+    expect(request.headers.get("authorization")).toBe("Bearer bedrock-api-key");
+    expect((JSON.parse(request.body) as { model: string }).model).toBe("custom-chat-model");
+  }, 15000);
+
+  it("requires the deployment Bedrock Mantle API key", () => {
+    expect(() => getModel(env({ CF_AI_GATEWAY: undefined }),
+        BEDROCK_MANTLE_CONFIG, INITIATOR)).toThrow("AWS_BEARER_TOKEN_BEDROCK is required");
+  });
 
   it("uses the config's own account and token for direct Workers AI", async () => {
     // Outside gateway mode, Workers AI is BYOK like any other provider: credentials come from

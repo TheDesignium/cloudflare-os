@@ -28,10 +28,14 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 export function getModelTokenLimits(config: AiModelConfig):
     {inputBudget: number, maxOutputTokens?: number} {
   let model = SUGGESTED_MODELS[config.provider][config.model];
-  let maxOutputTokens = model?.outputLimit ??
+  let maxOutputTokens = config.maxTokens ?? model?.maxTokens ?? model?.outputLimit ??
       (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined);
+  let defaultContextWindow = config.provider === "bedrock-mantle" ? 1_000_000 : DEFAULT_CONTEXT_WINDOW;
   return {
-    inputBudget: (model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) - (maxOutputTokens ?? 0),
+    // maxTokens is a request cap for an input-only context window. outputLimit is additionally
+    // reserved from providers whose response shares the published total context window.
+    inputBudget: (model?.contextWindow ?? defaultContextWindow) -
+        (model?.outputLimit ?? (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : 0)),
     maxOutputTokens,
   };
 }

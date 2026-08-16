@@ -15,7 +15,8 @@ import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
-import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
+import { AiChatAuthorInfo, AiModelConfig, BedrockMantleApi, SUGGESTED_MODELS,
+  WORKERS_AI_OUTPUT_LIMIT }
   from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
@@ -125,11 +126,40 @@ const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
 
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
+const BEDROCK_MANTLE_REGION = "us-east-1";
+
+const BEDROCK_MANTLE_ROUTES: Record<BedrockMantleApi, {
+  api: "anthropic-messages" | "openai-responses" | "openai-completions";
+  provider: "anthropic" | "openai";
+  basePath: string;
+}> = {
+  "anthropic-messages": {
+    api: "anthropic-messages", provider: "anthropic", basePath: "/anthropic",
+  },
+  "openai-responses": {
+    api: "openai-responses", provider: "openai", basePath: "/v1",
+  },
+  "openai-responses-namespaced": {
+    api: "openai-responses", provider: "openai", basePath: "/openai/v1",
+  },
+  "openai-chat-completions": {
+    api: "openai-completions", provider: "openai", basePath: "/v1",
+  },
+};
+
 // Consult pi's builtin catalog for cost/compat metadata of a known model id. Unknown models are
 // fine (synthesized with zero cost). Import per-provider, not providers/all.
 function catalogModel(provider: AiModelConfig["provider"], modelId: string): Model<Api> | undefined {
   switch (provider) {
     case "anthropic": return (ANTHROPIC_MODELS as Record<string, Model<Api>>)[modelId];
+    case "bedrock-mantle": {
+      if (modelId.startsWith("openai.")) {
+        return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId.substring("openai.".length)];
+      }
+      const anthropicModelId = modelId.startsWith("anthropic.")
+          ? modelId.substring("anthropic.".length) : modelId;
+      return (ANTHROPIC_MODELS as Record<string, Model<Api>>)[anthropicModelId];
+    }
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
@@ -145,8 +175,9 @@ function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined
     : { contextWindow: number, maxTokens: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
   return {
-    contextWindow: suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000,
-    maxTokens: suggested?.outputLimit ??
+    contextWindow: suggested?.contextWindow ?? catalog?.contextWindow ??
+        (config.provider === "bedrock-mantle" ? 1_000_000 : 128_000),
+    maxTokens: config.maxTokens ?? suggested?.maxTokens ?? suggested?.outputLimit ??
         (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
         catalog?.maxTokens ?? 4096,
   };
@@ -372,7 +403,7 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
     return getModelViaGateway(gwConfig, config, initiator, options);
   }
 
-  return getModelDirect(config, options.sessionAffinity);
+  return getModelDirect(env, config, options.sessionAffinity);
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -504,8 +535,10 @@ function getModelViaGateway(
   });
 }
 
-// Direct provider access using the credentials in the model config itself (no AI Gateway).
-function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+// Direct provider access with no AI Gateway. Most providers use credentials from the model config;
+// Bedrock Mantle instead uses deployment-wide Worker environment settings.
+function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
+                        sessionAffinity?: string): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
@@ -528,6 +561,41 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         apiKey: config.apiToken,
         sessionAffinity,
       });
+    case "bedrock-mantle": {
+      const apiToken = env.AWS_BEARER_TOKEN_BEDROCK?.trim();
+      if (!apiToken) {
+        throw new Error(
+            "AWS_BEARER_TOKEN_BEDROCK is required to use a Bedrock Mantle model.");
+      }
+      const route = config.bedrockMantleApi
+          ? BEDROCK_MANTLE_ROUTES[config.bedrockMantleApi] : undefined;
+      if (!route) throw new Error("A Bedrock Mantle API endpoint selection is required.");
+      const anthropicAuth = route.api === "anthropic-messages";
+      return makeHandle({
+        model: {
+          id: config.model,
+          name: catalog?.name ?? config.model,
+          api: route.api,
+          provider: route.provider,
+          baseUrl:
+              `https://bedrock-mantle.${BEDROCK_MANTLE_REGION}.api.aws${route.basePath}`,
+          reasoning: catalog?.reasoning ?? route.api !== "openai-completions",
+          input: catalog?.input ?? ["text", "image"],
+          cost: catalog?.cost ?? ZERO_COST,
+          ...window,
+          thinkingLevelMap: catalog?.thinkingLevelMap,
+          compat: catalog?.api === route.api ? catalog.compat : undefined,
+        },
+        ...(anthropicAuth ? {
+          headers: {
+            Authorization: `Bearer ${apiToken}`,
+            // Header-owned bearer auth: prevent the Anthropic SDK from adding its own key header.
+            "x-api-key": null,
+          },
+        } : {apiKey: apiToken}),
+        sessionAffinity,
+      });
+    }
     case "cloudflare": {
       // Workers AI is fetch-only (no Workers-binding transport), so outside AI Gateway mode it's
       // BYOK like every other provider: the user's own account ID and API token come from the
