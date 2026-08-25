@@ -5911,7 +5911,9 @@ class OverseerImpl implements AgentHooks {
           "a agent callback, but the callback's RPC call has since ended, invalidating " +
           "the stub.");
     }
-    return stubs[stubIndex];
+    // Returning a stub transfers ownership to the caller. Keep the original alive so later
+    // executeCode invocations can retrieve it until the deliverAgentCallback RPC returns.
+    return stubs[stubIndex].dup();
   }
 
   // Called by AgentSelfLoopback when any method is called on the `self` object.
