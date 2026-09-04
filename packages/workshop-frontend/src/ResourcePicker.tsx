@@ -11,6 +11,7 @@ import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { startAccountConnection } from './accountConnection'
 
 export interface VendorOption {
   id: string
@@ -386,7 +387,7 @@ export default function ResourcePicker({
             }
           }
         } else {
-          handleConnectNew(item.vendorId, item.resourceUrlPatterns)
+          handleConnectNew(item.vendorId, item.vendorDescription, item.resourceUrlPatterns)
         }
       }
       return () => { activateRef.current = null }
@@ -395,11 +396,21 @@ export default function ResourcePicker({
 
   // --- Connect new account handler ---
 
-  const handleConnectNew = async (vendorId: string, resourceUrlPatterns?: string[]) => {
+  const handleConnectNew = async (
+    vendorId: string,
+    vendorDescription: VendorDescription,
+    resourceUrlPatterns?: string[],
+  ) => {
     setConnectingVendor(vendorId)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      const result = await startAccountConnection(
+        authenticatedApi,
+        { id: vendorId, description: vendorDescription },
+        resourceUrlPatterns,
+      )
+      if (result.kind === 'authorization') {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+      }
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
@@ -610,7 +621,11 @@ export default function ResourcePicker({
                   itemIdx++
                   return (
                   <div
-                    onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
+                    onClick={() => !connectingVendor && handleConnectNew(
+                      vendor.id,
+                      vendor.description,
+                      resource.grantable ? [resource.urlPattern] : undefined,
+                    )}
                     className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
                     style={{
                       cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',

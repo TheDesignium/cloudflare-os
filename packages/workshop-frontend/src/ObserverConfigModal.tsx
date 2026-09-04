@@ -17,6 +17,7 @@ import {
 import { WorkshopButton } from './components/WorkshopControls'
 import Avatar from './components/Avatar'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { startAccountConnection } from './accountConnection'
 
 // Shown when a non-owner opens a shared Gadget that reads data through one or more gatekeeper
 // bindings, and they haven't yet chosen which of their own connected accounts to use for each one.
@@ -206,16 +207,15 @@ export default function ObserverConfigModal({
     connectingRef.current = vendorId
     setConnecting(vendorId)
     try {
-      const vendor = vendorsById.get(vendorId)
-      if (vendor?.description.autoProvisionsAccount) {
-        await authenticatedApi.provisionAmbientAccount(vendorId)
-      } else {
-        const required = requiredResourceUrlPatterns(need, vendor)
-        const { url } = await authenticatedApi.connectAccount(
-          vendorId,
-          required.length > 0 ? required : undefined,
-        )
-        window.open(url, '_blank', 'noopener,noreferrer')
+      const vendor = vendorsById.get(vendorId)!
+      const required = requiredResourceUrlPatterns(need, vendor)
+      const result = await startAccountConnection(
+        authenticatedApi,
+        vendor,
+        required.length > 0 ? required : undefined,
+      )
+      if (result.kind === 'authorization') {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
       }
     } catch (err) {
       console.error('Failed to initiate connection:', err)

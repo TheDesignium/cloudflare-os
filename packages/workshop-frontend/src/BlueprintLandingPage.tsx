@@ -21,6 +21,7 @@ import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControl
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { startAccountConnection } from './accountConnection'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -188,13 +189,18 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     }
   }, [isAuthenticated, authenticatedApi])
 
-  const handleConnectAccount = useCallback(async (vendorId: string) => {
+  const handleConnectAccount = useCallback(async (vendorId: string, vendorDescription: VendorDescription) => {
     if (!authenticatedApi) return
     setConnectingVendor(vendorId)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
-      toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
+      const result = await startAccountConnection(
+        authenticatedApi,
+        { id: vendorId, description: vendorDescription },
+      )
+      if (result.kind === 'authorization') {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+        toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
+      }
     } catch (err) {
       console.error('Failed to initiate connection:', err)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
@@ -1358,7 +1364,7 @@ function BindingField({
   connectingVendor: string | null
   reconnectingAccountId: number | null
   onChange: (updates: Partial<BlueprintBindingAssignment>) => void
-  onConnectAccount: (vendorId: string) => void
+  onConnectAccount: (vendorId: string, vendorDescription: VendorDescription) => void
   onReconnectAccount: (accountId: number) => void
   onReadyChange: (ready: boolean) => void
   onCollectorChange: (collect: (() => Promise<string>) | null) => void
@@ -1502,7 +1508,7 @@ function BlueprintGatekeeperBindingField({
   connectingVendor: string | null
   reconnectingAccountId: number | null
   onChange: (updates: Partial<BlueprintBindingAssignment>) => void
-  onConnectAccount: (vendorId: string) => void
+  onConnectAccount: (vendorId: string, vendorDescription: VendorDescription) => void
   onReconnectAccount: (accountId: number) => void
   onReadyChange: (ready: boolean) => void
   onCollectorChange: (collect: (() => Promise<string>) | null) => void
@@ -1651,7 +1657,7 @@ function BlueprintGatekeeperBindingField({
         connecting={connectingVendor === binding.gatekeeperName}
         reconnectingAccountId={reconnectingAccountId}
         onSelect={(id) => onChange({ accountId: id } as any)}
-        onConnect={() => onConnectAccount(binding.gatekeeperName)}
+        onConnect={() => onConnectAccount(binding.gatekeeperName, vendor.description)}
         onReconnect={onReconnectAccount}
       />
 

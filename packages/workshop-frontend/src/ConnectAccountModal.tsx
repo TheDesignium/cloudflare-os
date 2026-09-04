@@ -4,6 +4,7 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api'
 import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import VendorCard from './VendorCard'
+import { startAccountConnection } from './accountConnection'
 
 interface ConnectAccountModalProps {
   visible: boolean
@@ -61,11 +62,13 @@ export default function ConnectAccountModal({
     fetchVendors()
   }, [visible, authenticatedApi, filter])
 
-  const handleConnect = async (vendorId: string) => {
-    setConnecting(vendorId)
+  const handleConnect = async (vendor: VendorOption) => {
+    setConnecting(vendor.id)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      const result = await startAccountConnection(authenticatedApi, vendor)
+      if (result.kind === 'authorization') {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+      }
       onInitiated()
     } catch (error) {
       console.error('Failed to initiate connection:', error)
@@ -92,7 +95,7 @@ export default function ConnectAccountModal({
               <VendorCard
                 key={vendor.id}
                 vendor={vendor.description}
-                onClick={() => handleConnect(vendor.id)}
+                onClick={() => handleConnect(vendor)}
                 loading={connecting === vendor.id}
                 disabled={connecting !== null && connecting !== vendor.id}
               />

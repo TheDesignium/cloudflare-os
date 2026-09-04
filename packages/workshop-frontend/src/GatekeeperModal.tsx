@@ -35,6 +35,7 @@ import { matchesResourceUrl } from './resourceMatching'
 import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { startAccountConnection } from './accountConnection'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -78,6 +79,7 @@ type ConnectionTypeId =
 type ConnectionType = {
   id: ConnectionTypeId
   vendorId?: string
+  vendorDescription?: VendorDescription
   // Stable grouping key used by the picker to bucket connection types. For
   // resource connections this is the vendor's stable ID (so all of Google's
   // resources land in one group). Platform types use their own `id` so that
@@ -147,6 +149,7 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
   return {
     id: `resource:${vendor.id}:${resource.urlPattern}`,
     vendorId: vendor.id,
+    vendorDescription: vendor.description,
     // Group by stable vendor ID, not displayName, so two distinct vendors that
     // happen to share a display name don't get merged into the same group.
     groupKey: `vendor:${vendor.id}`,
@@ -594,12 +597,22 @@ export default function GatekeeperModal({
     else setSelectedAccountId(null)
   }
 
-  const handleConnectAccount = async (vendorId: string, resourceUrlPatterns?: string[]) => {
+  const handleConnectAccount = async (
+    vendorId: string,
+    vendorDescription: VendorDescription,
+    resourceUrlPatterns?: string[],
+  ) => {
     setConnectingVendor(vendorId)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
-      toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
+      const result = await startAccountConnection(
+        authenticatedApi,
+        { id: vendorId, description: vendorDescription },
+        resourceUrlPatterns,
+      )
+      if (result.kind === 'authorization') {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+        toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
+      }
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
@@ -842,7 +855,11 @@ export default function GatekeeperModal({
                       if (!selectedConnection.vendorId) return
                       const required = requiredResourceUrlPatterns(selectedConnection)
                       // No grantable requirement -> request authorization for everything
-                      handleConnectAccount(selectedConnection.vendorId, required.length ? required : undefined)
+                      handleConnectAccount(
+                        selectedConnection.vendorId,
+                        selectedConnection.vendorDescription!,
+                        required.length ? required : undefined,
+                      )
                     }}
                     onReconnect={handleReconnectAccount}
                     onGrantAccess={handleGrantResourceAccess}

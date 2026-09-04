@@ -32,6 +32,7 @@ import { useSiteName } from './ServerConfigContext'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { startAccountConnection } from './accountConnection'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -248,11 +249,13 @@ export default function OnboardingWizard({
 
   // ── connection handlers ───────────────────────────────────────────────────────
 
-  const handleConnect = async (vendorId: string) => {
-    setConnectingVendorId(vendorId)
+  const handleConnect = async (vendor: VendorEntry) => {
+    setConnectingVendorId(vendor.id)
     try {
-      const { url } = await authenticatedApi.connectAccount(vendorId)
-      window.open(url, '_blank', 'noopener,noreferrer')
+      const result = await startAccountConnection(authenticatedApi, vendor)
+      if (result.kind === 'authorization') {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+      }
     } catch (err) {
       console.error('Failed to start connection:', err)
       toasts.add({ title: 'Failed to start connection', variant: 'error' })
@@ -586,7 +589,7 @@ export default function OnboardingWizard({
                       return (
                         <button
                           key={vendor.id}
-                          onClick={() => !isConnected && !isConnecting && handleConnect(vendor.id)}
+                          onClick={() => !isConnected && !isConnecting && handleConnect(vendor)}
                           disabled={isConnected || isConnecting}
                           className={`
                             flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left

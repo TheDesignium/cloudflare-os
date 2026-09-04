@@ -25,6 +25,7 @@ import { GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
 import { AccountsSubscriberAdapter } from '../accountsSubscriber'
+import { startAccountConnection } from '../accountConnection'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -568,16 +569,19 @@ function ConnectorsPage() {
     const vendorId = modalTarget.vendorId
     setConnecting(true)
     try {
-      if (isTargetAmbient) {
+      const result = await startAccountConnection(
+        authenticatedApi,
+        activeVendor!,
+        resourceUrlPatterns,
+      )
+      if (result.kind === 'provisioned') {
         // Ambient gatekeeper: mint the account directly, no OAuth redirect. It then appears under
         // "Connected" via the subscription and drops out of "Available".
-        await authenticatedApi.provisionAmbientAccount(vendorId)
         setAddable((prev) => prev.filter((g) => g.id !== vendorId))
         // If the gatekeeper provides a management UI, its nav entry should appear without a reload.
         refreshGatekeeperApps(authenticatedApi)
       } else {
-        const { url } = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-        window.open(url, '_blank', 'noopener,noreferrer')
+        window.open(result.url, '_blank', 'noopener,noreferrer')
       }
       handleCloseModal()
     } catch (err) {
